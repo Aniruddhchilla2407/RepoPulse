@@ -1,0 +1,23 @@
+name: repopulse
+version: "0.3.0"
+config-version: 2
+profile: repopulse
+
+model-paths: ["models"]
+test-paths: ["tests"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  session_gap_minutes: 30        # inactivity gap that starts a new session
+  exclude_bots_from_sessions: true
+  cohort_grain: hour             # hour | day | week. Use day once the data spans several days.
+
+models:
+  repopulse:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table
+    analytics:
+      +materialized: table

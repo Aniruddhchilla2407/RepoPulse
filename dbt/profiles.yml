@@ -1,0 +1,11 @@
+repopulse:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('REPOPULSE_DB', 'data/warehouse/repopulse.duckdb') }}"
+      schema: gold
+      threads: 1
+      settings:
+        TimeZone: UTC
+        memory_limit: "{{ env_var('REPOPULSE_DUCKDB_MEMORY', '3GB') }}"

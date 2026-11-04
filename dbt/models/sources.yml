@@ -1,0 +1,18 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    description: Silver events loaded from local Parquet by repopulse.load_warehouse.
+    tables:
+      - name: silver_events
+        columns:
+          - name: event_id
+            data_tests:
+              - not_null
+          - name: event_type
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [PushEvent, PullRequestEvent, IssuesEvent, WatchEvent, ForkEvent]

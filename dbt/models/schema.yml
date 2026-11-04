@@ -1,0 +1,109 @@
+version: 2
+
+models:
+  - name: stg_silver_events
+    description: Raw silver events, one row per event_id (earliest source partition wins).
+    columns:
+      - name: event_id
+        data_tests:
+          - unique
+          - not_null
+
+  - name: dim_repo
+    description: One row per repository, with the latest name and organisation seen.
+    columns:
+      - name: repo_id
+        data_tests:
+          - unique
+          - not_null
+
+  - name: dim_actor
+    description: One row per actor, with the latest login and a bot flag.
+    columns:
+      - name: actor_id
+        data_tests:
+          - unique
+          - not_null
+      - name: is_bot
+        data_tests:
+          - not_null
+
+  - name: dim_date
+    description: Calendar covering every event date in the data.
+    columns:
+      - name: date_day
+        data_tests:
+          - unique
+          - not_null
+      - name: date_key
+        data_tests:
+          - unique
+          - not_null
+
+  - name: fact_events
+    description: One row per GitHub event, stored sorted by event_date, event_type, repo_id.
+    columns:
+      - name: event_id
+        data_tests:
+          - unique
+          - not_null
+      - name: event_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [PushEvent, PullRequestEvent, IssuesEvent, WatchEvent, ForkEvent]
+      - name: created_at
+        data_tests:
+          - not_null
+          - no_future_timestamps
+      - name: event_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: repo_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_repo')
+                field: repo_id
+      - name: actor_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_actor')
+                field: actor_id
+
+  - name: mart_repo_hourly_activity
+    description: Hourly activity per repo with cumulative, moving-average, lag and rank window functions.
+    columns:
+      - name: repo_id
+        data_tests:
+          - not_null
+      - name: event_hour
+        data_tests:
+          - not_null
+
+  - name: mart_actor_sessions
+    description: Sessions per actor, split on an inactivity gap (var session_gap_minutes).
+    columns:
+      - name: session_id
+        data_tests:
+          - unique
+          - not_null
+      - name: duration_seconds
+        data_tests:
+          - not_null
+
+  - name: mart_actor_retention
+    description: Retention cohorts by first active period (var cohort_grain).
+    columns:
+      - name: cohort_period
+        data_tests:
+          - not_null
+      - name: periods_since_first
+        data_tests:
+          - not_null

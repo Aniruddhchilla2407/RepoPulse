@@ -1,0 +1,21 @@
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+.env
+*.json.part
+*.part
+spark-warehouse/
+metastore_db/
+derby.log
+# credentials
+*-key.json
+service-account*.json
+# dbt
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+logs/

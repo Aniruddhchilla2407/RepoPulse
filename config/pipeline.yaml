@@ -1,0 +1,46 @@
+paths:
+  raw: data/raw
+  bronze: data/bronze
+  quarantine: data/quarantine
+  silver: data/silver
+  metrics: data/metrics
+  ml: data/ml
+
+event_types:
+  - PushEvent
+  - PullRequestEvent
+  - IssuesEvent
+  - WatchEvent
+  - ForkEvent
+
+ingest:
+  base_url: https://data.gharchive.org
+  workers: 3
+  max_retries: 4
+  backoff_seconds: 2.0
+  timeout_seconds: 60
+
+spark:
+  master: "local[*]"
+  driver_memory: 3g        # overridden by the SPARK_DRIVER_MEMORY env var
+  shuffle_partitions: 8
+
+warehouse:
+  path: data/warehouse/repopulse.duckdb   # env override: REPOPULSE_DB
+  memory_limit: 3GB                       # env override: REPOPULSE_DUCKDB_MEMORY
+  threads: 4
+
+dq:                              # data-quality gate thresholds (repopulse.dq)
+  min_rows_per_hour: 1000
+  max_quarantine_rate: 0.01
+  max_dedup_loss_rate: 0.05
+  max_key_null_rate: 0.001
+
+ml:
+  feature_window_hours: 72       # W: look-back window for features
+  horizon_hours: 72              # N = 3 days (the project default). Override with --horizon-hours
+  breakout_threshold: 10         # "breakout" = at least this many stars within the horizon
+  min_feature_events: 2          # ignore repos with fewer events than this in the window
+  gbt_max_iter: 50
+  gbt_max_depth: 4
+  logreg_max_iter: 100
