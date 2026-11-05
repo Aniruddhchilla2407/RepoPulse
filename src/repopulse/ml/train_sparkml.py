@@ -1,4 +1,8 @@
-"""SparkML: class-weighted gradient-boosted trees (main) vs logistic regression (baseline)."""
+"""SparkML: class-weighted gradient-boosted trees (main) vs logistic regression (baseline).
+
+Both models train on the same rows: the train split, optionally with negatives downsampled,
+minus a hash-selected holdout that the GBT uses for early stopping.
+"""
 
 import argparse
 import json
@@ -25,16 +29,18 @@ LR_COLUMNS = [f"lr_{c}" for c in FEATURE_COLUMNS]
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Train the SparkML breakout models.")
     parser.add_argument("--config", default=None, help="path to pipeline.yaml")
-    parser.add_argument("--max-iter", type=int, default=None, help="GBT iterations")
-    parser.add_argument("--max-depth", type=int, default=None, help="GBT tree depth")
+    parser.add_argument("--neg-per-pos", type=int, default=20,
+                        help="keep at most this many negatives per positive (0 = no downsampling)")
+    parser.add_argument("--max-iter", type=int, default=200, help="GBT tree cap (early stopping applies)")
+    parser.add_argument("--max-depth", type=int, default=3, help="GBT tree depth")
+    parser.add_argument("--step-size", type=float, default=0.05, help="GBT learning rate")
+    parser.add_argument("--holdout-pct", type=int, default=20, help="train share used for early stopping")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args(argv)
 
     setup_logging()
     cfg = load_config(args.config)
-    ml_cfg = cfg.get("ml") or {}
-    max_iter = args.max_iter or int(ml_cfg.get("gbt_max_iter", 50))
-    max_depth = args.max_depth or int(ml_cfg.get("gbt_max_depth", 3))
-    lr_iter = int(ml_cfg.get("logreg_max_iter", 100))
+    lr_iter = int((cfg.get("ml") or {}).get("logreg_max_iter", 100))
     ml_dir = Path(cfg["paths"].get("ml", "data/ml"))
     features_path = ml_dir / "features.parquet"
     if not features_path.exists():
@@ -47,55 +53,59 @@ def main(argv: list[str] | None = None) -> int:
         df = spark.read.parquet(str(features_path.resolve()))
         for column in FEATURE_COLUMNS:
             df = df.withColumn(column, F.col(column).cast("double"))
-            # Log scale transformation for heavy-tailed counts
+            # log scale for the linear baseline: heavy-tailed counts, signed for star_accel
             df = df.withColumn(
                 f"lr_{column}", F.signum(F.col(column)) * F.log1p(F.abs(F.col(column)))
             )
         df = df.withColumn("label_d", F.col("label").cast("double"))
 
-        train = df.where(F.col("split") == "train").persist()
-        total = train.count()
-        positives = train.where(F.col("label") == 1).count()
-        negatives = total - positives
-        if positives == 0 or negatives == 0:
-            log.error("training data has one class only (pos=%d, neg=%d)", positives, negatives)
+        train_all = df.where(F.col("split") == "train")
+        pos_all = train_all.where(F.col("label") == 1).count()
+        neg_all = train_all.where(F.col("label") == 0).count()
+        if pos_all == 0 or neg_all == 0:
+            log.error("training data has one class only (pos=%d, neg=%d)", pos_all, neg_all)
             return 3
-        
-        weight = negatives / positives  # Class weight multiplier for Logistic Regression
+
+        train = train_all
+        if args.neg_per_pos > 0 and neg_all > args.neg_per_pos * pos_all:
+            fraction = args.neg_per_pos * pos_all / neg_all
+            train = train_all.sampleBy("label", {0: fraction, 1: 1.0}, seed=args.seed)
+
+        # hash-selected holdout: used only by the GBT for early stopping, never for fitting
+        train = train.withColumn(
+            "is_val", F.pmod(F.hash(F.col("repo_id")), F.lit(100)) < args.holdout_pct
+        ).persist()
+        fit_rows = train.where(~F.col("is_val"))
+        pos_fit = fit_rows.where(F.col("label") == 1).count()
+        neg_fit = fit_rows.where(F.col("label") == 0).count()
+        if pos_fit == 0:
+            log.error("no positive examples left after the holdout split; lower --holdout-pct")
+            return 3
+        weight = neg_fit / pos_fit  # class weighting on the (possibly downsampled) fit rows
         train = train.withColumn(
             "weight", F.when(F.col("label") == 1, F.lit(weight)).otherwise(F.lit(1.0))
         )
+        fit_rows = train.where(~F.col("is_val"))
 
-        # ------------------------------------------------------------------
-        # Downsample majority class for GBT to resolve PySpark weightCol degradation
-        # ------------------------------------------------------------------
-        pos_train = train.where(F.col("label") == 1)
-        neg_train = train.where(F.col("label") == 0)
-        
-        # Target ~1:10 positive to negative ratio (approx. 2,110 negative samples)
-        neg_fraction = min(1.0, (positives * 10) / negatives)
-        neg_sampled = neg_train.sample(withReplacement=False, fraction=neg_fraction, seed=42)
-        
-        gbt_train = pos_train.union(neg_sampled).persist()
-
-        # GBT Pipeline: Trained on downsampled data without weightCol
         gbt_model = Pipeline(
             stages=[
-                VectorAssembler(inputCols=LR_COLUMNS, outputCol="gbt_features", handleInvalid="keep"),
+                VectorAssembler(inputCols=FEATURE_COLUMNS, outputCol="features", handleInvalid="keep"),
                 GBTClassifier(
                     labelCol="label_d",
-                    featuresCol="gbt_features",
-                    maxIter=max_iter,
-                    maxDepth=max_depth,
-                    stepSize=0.05,
+                    featuresCol="features",
+                    weightCol="weight",
+                    maxIter=args.max_iter,
+                    maxDepth=args.max_depth,
+                    stepSize=args.step_size,
                     subsamplingRate=0.8,
-                    maxBins=64,
-                    seed=42,
+                    minInstancesPerNode=10,
+                    validationIndicatorCol="is_val",
+                    validationTol=0.001,
+                    seed=args.seed,
                 ),
             ]
-        ).fit(gbt_train)
+        ).fit(train)
 
-        # Logistic Regression Pipeline: Trained on full dataset using weightCol
         lr_model = Pipeline(
             stages=[
                 VectorAssembler(inputCols=LR_COLUMNS, outputCol="lr_features", handleInvalid="keep"),
@@ -111,10 +121,10 @@ def main(argv: list[str] | None = None) -> int:
                     standardization=True,
                 ),
             ]
-        ).fit(train)
+        ).fit(fit_rows)
         train_seconds = time.perf_counter() - started
 
-        to_score = df.where(F.col("split").isin("valid", "test", "score"))
+        to_score = df.where(F.col("split").isin("train", "valid", "test", "score"))
         scored = lr_model.transform(gbt_model.transform(to_score)).select(
             F.col("repo_id").cast("long").alias("repo_id"),
             F.col("split"),
@@ -130,12 +140,23 @@ def main(argv: list[str] | None = None) -> int:
         gbt_model.write().overwrite().save(str((ml_dir / "model_gbt").resolve()))
         lr_model.write().overwrite().save(str((ml_dir / "model_logreg").resolve()))
 
-        importances = gbt_model.stages[-1].featureImportances.toArray()
+        gbt = gbt_model.stages[-1]
+        importances = gbt.featureImportances.toArray()
         stats = {
-            "train_rows": total,
-            "train_positives": positives,
+            "downsampling": {
+                "neg_per_pos": args.neg_per_pos,
+                "train_positives": pos_all,
+                "train_negatives_before": neg_all,
+                "negatives_kept_incl_holdout": train.where(F.col("label") == 0).count(),
+            },
+            "fit_rows": {"positives": pos_fit, "negatives": neg_fit, "holdout_pct": args.holdout_pct},
             "positive_class_weight": round(weight, 2),
-            "gbt": {"max_iter": max_iter, "max_depth": max_depth},
+            "gbt": {
+                "tree_cap": args.max_iter,
+                "trees_used": len(gbt.trees),
+                "max_depth": args.max_depth,
+                "step_size": args.step_size,
+            },
             "logreg": {"max_iter": lr_iter, "reg_param": 0.01},
             "scored_rows": per_split,
             "train_seconds": round(train_seconds, 2),

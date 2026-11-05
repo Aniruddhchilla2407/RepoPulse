@@ -1,7 +1,4 @@
 x-airflow-common: &airflow-common
-  build:
-    context: .
-    dockerfile: Dockerfile
   image: repopulse-airflow:2.10.5
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -39,6 +36,9 @@ services:
 
   airflow-init:
     <<: *airflow-common
+    build:
+      context: .
+      dockerfile: Dockerfile
     command: >
       bash -c "airflow db migrate &&
       (airflow users create --username admin --password admin --firstname Repo
